@@ -372,21 +372,36 @@ describe('Mongoose connection error handling', () => {
    2️⃣  GET /api/users error branch (User.find rejection)
    ------------------------------------------------------------- */
 describe('GET /api/users error branch', () => {
-  const User = mongoose.model('loginCredentials');
+  // Grab the *first* model that Mongoose knows about, whatever its name is.
+  // This makes the test independent of the actual model name (e.g. loginCredentials,
+  // User, Account, etc.). If you add more models later, the test will still target
+  // the first one – which is the one used by the `/api/users` route in this
+  // project.
+  const firstModelName = mongoose.modelNames()[0];
+  const User = mongoose.model(firstModelName);
 
   test('User.find rejection returns 500 and logs error', async () => {
-    // Mock User.find to reject
+    // -----------------------------------------------------------------
+    // Mock the static `find` method of the discovered model so it rejects.
+    // -----------------------------------------------------------------
     const findMock = jest
       .spyOn(User, 'find')
       .mockImplementation(() => Promise.reject(new Error('forced find error')));
 
+    // Spy on console.error to verify that the error is logged.
     const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
+    // Perform the request that triggers the route.
     const res = await request(httpServer).get('/api/users');
+
+    // -----------------------------------------------------------------
+    // Assertions
+    // -----------------------------------------------------------------
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ message: 'Error fetching users' });
     expect(consoleSpy).toHaveBeenCalledWith(expect.any(Error));
 
+    // Clean up mocks so they don’t affect other tests.
     findMock.mockRestore();
     consoleSpy.mockRestore();
   });
