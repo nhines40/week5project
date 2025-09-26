@@ -102,7 +102,13 @@ app.post('/api/users', (req, res) => {
 app.put('/api/users/:id', (req, res) => {
   const { name, email } = req.body;
   User.findByIdAndUpdate(req.params.id, { name, email }, { new: true })
-    .then(user => res.status(200).json(user))
+    .then(user => {
+      if (!user) {
+        // No document with that _id
+        return res.status(404).json({ message: 'User not found' });
+      }
+      res.status(200).json(user);
+    })
     .catch(err => {
       console.error(err);
       res.status(500).json({ message: 'Error updating user' });
@@ -111,7 +117,13 @@ app.put('/api/users/:id', (req, res) => {
 
 app.delete('/api/users/:id', (req, res) => {
   User.findByIdAndDelete(req.params.id)
-    .then(() => res.status(200).json({ message: 'User deleted successfully' }))
+    .then(user => {
+      if (!user) {
+        // Nothing was deleted
+        return res.status(404).json({ message: 'User not found' });
+      }
+      res.status(200).json({ message: 'User deleted successfully' });
+    })
     .catch(err => {
       console.error(err);
       res.status(500).json({ message: 'Error deleting user' });

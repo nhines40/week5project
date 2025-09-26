@@ -6,18 +6,52 @@
 const http = require('http');
 const request = require('supertest');
 const WebSocket = require('ws');
+const mongoose = require('mongoose');
+const { MongoMemoryServer } = require('mongodb-memory-server');
 
-// Mock axios **before** we import the server so the server uses the mock
-jest.mock('axios');
-const axios = require('axios');
+/* -------------- In‑memory MongoDB (or real DB) -------------- */
+let mongoServer;
+let app;      // Express app exported from server.js
+let wss;      // WebSocket server exported from server.js
 
-const { app, wss } = require('../server');   // <-- app & ws server
+beforeAll(async () => {
+  /* --------------------------------------------------------------
+     1️⃣  Spin up an in‑memory MongoDB instance (or connect to a real one)
+         – If you already have a real MongoDB running and want to use it,
+           comment‑out the `MongoMemoryServer` lines and set
+           `process.env.MONGO_URI` to your real URI before running the tests.
+     -------------------------------------------------------------- */
+  mongoServer = await MongoMemoryServer.create();
+  const uri = mongoServer.getUri();
 
-let httpServer;   // Express HTTP server used by SuperTest
+  // Make the URI visible to server.js (it reads process.env.MONGO_URI)
+  process.env.MONGO_URI = uri;
+
+  // Connect Mongoose *once* – server.js will reuse this connection.
+  await mongoose.connect(uri);
+
+  /* --------------------------------------------------------------
+     2️⃣  **Clear the collection** – ensures a pristine DB for every run.
+         This is the line you asked about.
+     -------------------------------------------------------------- */
+  await mongoose.connection.collection('logincredentials').deleteMany({});
+
+  // 3️⃣  Now require the server (it will see process.env.MONGO_URI)
+  const serverModule = require('../server');   // <-- relative to this file
+  app = serverModule.app;
+  wss = serverModule.wss;
+});
+
+afterAll(async () => {
+  // Clean up Mongoose and the in‑memory server
+  await mongoose.disconnect();
+  await mongoServer.stop();
+});
 
 /* --------------------------------------------------------------
-   Start/stop the HTTP server once for the whole suite.
+   Start/stop the HTTP server (Express) – one per suite.
    -------------------------------------------------------------- */
+let httpServer;
 beforeAll((done) => {
   httpServer = http.createServer(app);
   httpServer.listen(0, done);   // random free port
@@ -107,8 +141,8 @@ describe('User CRUD API', () => {
     const res = await request(httpServer)
       .put(`/api/users/${fakeId}`)
       .send({ name: 'Ghost', email: 'ghost@example.com' });
-    expect(res.status).toBe(500);
-    expect(res.body.message).toBe('Error updating user');
+    expect(res.status).toBe(404);               // <-- updated to match new route
+    expect(res.body.message).toBe('User not found');
   });
 
   test('PUT /api/users/:id – invalid ObjectId format', async () => {
@@ -122,8 +156,8 @@ describe('User CRUD API', () => {
   test('DELETE /api/users/:id – non‑existent ID', async () => {
     const fakeId = '64b0c0c0c0c0c0c0c0c0c0c0';
     const res = await request(httpServer).delete(`/api/users/${fakeId}`);
-    expect(res.status).toBe(500);
-    expect(res.body.message).toBe('Error deleting user');
+    expect(res.status).toBe(404);               // <-- updated
+    expect(res.body.message).toBe('User not found');
   });
 
   test('DELETE /api/users/:id – invalid ObjectId format', async () => {
@@ -187,12 +221,13 @@ describe('OAuth redirect endpoints', () => {
    OAUTH CALLBACKS – mocked external calls
    ------------------------------------------------------------- */
 describe('OAuth callbacks (mocked)', () => {
+  jest.mock('axios');
+  const axios = require('axios');
+
   afterEach(() => jest.clearAllMocks());
 
   test('LinkedIn callback success redirects to /?code=linkedin', async () => {
-    // 1️⃣  token exchange
     axios.post.mockResolvedValue({ data: { access_token: 'ln-token' } });
-    // 2️⃣  profile fetch
     axios.get.mockResolvedValue({
       data: {
         firstName: 'John',
@@ -206,7 +241,6 @@ describe('OAuth callbacks (mocked)', () => {
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe('/?code=linkedin');
 
-    // Verify the user was persisted
     const users = await request(httpServer).get('/api/users');
     const linkedInUser = users.body.find(u => u.linkedinId === 'ln123');
     expect(linkedInUser).toBeDefined();
