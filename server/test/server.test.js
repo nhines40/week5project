@@ -331,3 +331,191 @@ describe('WebSocket broadcasting', () => {
     }, 100);
   });
 });
+
+describe('Mongoose connection fallback (devUri)', () => {
+  const originalEnv = process.env;
+
+  beforeAll(() => {
+    // Remove the variable so the code falls back to the dev URI
+    delete process.env.MONGO_URI;
+  });
+
+  afterAll(() => {
+    process.env = originalEnv; // restore
+  });
+
+  test('connects using the hard‑coded dev URI when MONGO_URI is missing', async () => {
+    // Spy on mongoose.connect to capture the URI it receives
+    const connectSpy = jest.spyOn(require('mongoose'), 'connect')
+      .mockImplementation(() => Promise.resolve());
+
+    // Re‑require the server module after the env change
+    jest.resetModules();
+    const { app } = require('../server');
+
+    expect(connectSpy).toHaveBeenCalledWith('mongodb://localhost:27017/myDatabase');
+    connectSpy.mockRestore();
+  });
+});
+
+
+describe('Mongoose connection error handling', () => {
+  const originalEnv = process.env;
+
+  beforeAll(() => {
+    // Force the code to use the dev URI (or any bogus URI)
+    delete process.env.MONGO_URI;
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  test('logs an error when mongoose.connect rejects', async () => {
+    const error = new Error('simulated connection failure');
+    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Mock mongoose.connect to reject
+    jest.spyOn(require('mongoose'), 'connect')
+      .mockImplementation(() => Promise.reject(error));
+
+    // Re‑require the server so the mocked connect runs
+    jest.resetModules();
+    require('../server'); // the module executes the connect line
+
+    expect(consoleSpy).toHaveBeenCalledWith('Mongo connection error:', error);
+    consoleSpy.mockRestore();
+  });
+});
+
+
+describe('WebSocket server port selection (non‑test mode)', () => {
+  const originalEnv = process.env;
+
+  beforeAll(() => {
+    // Simulate a non‑test environment
+    process.env.NODE_ENV = 'development';
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  test('listens on 8080 when NODE_ENV !== "test"', (done) => {
+    // Re‑require the server after changing NODE_ENV
+    jest.resetModules();
+    const { wss } = require('../server');
+
+    // The server should have bound to 8080
+    expect(wss.address().port).toBe(8080);
+
+    // Clean up
+    wss.close(done);
+  });
+});
+
+describe('GET /api/users – error handling', () => {
+  let app, httpServer;
+
+  beforeAll(async () => {
+    // Mock the Mongoose model's `find` to reject
+    jest.spyOn(require('mongoose').model('loginCredentials'), 'find')
+      .mockImplementation(() => Promise.reject(new Error('find failed')));
+
+    const serverModule = require('../server');
+    app = serverModule.app;
+    httpServer = require('http').createServer(app);
+    await new Promise(res => httpServer.listen(0, res));
+  });
+
+  afterAll(async () => {
+    await new Promise(res => httpServer.close(res));
+    jest.restoreAllMocks();
+  });
+
+  test('returns 500 and proper JSON when find throws', async () => {
+    const res = await request(httpServer).get('/api/users');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ message: 'Error fetching users' });
+  });
+});
+
+describe('LinkedIn callback – error handling', () => {
+  const axios = require('axios');
+  const { app } = require('../server');
+  const httpServer = require('http').createServer(app);
+
+  beforeAll(done => httpServer.listen(0, done));
+  afterAll(done => httpServer.close(done));
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('returns 500 when token exchange fails', async () => {
+    axios.post.mockRejectedValue(new Error('token error'));
+
+    const res = await request(httpServer).get('/auth/linkedin/callback?code=bad');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ message: 'Error logging in with LinkedIn' });
+  });
+
+  test('returns 500 when profile fetch fails', async () => {
+    // token succeeds, profile request fails
+    axios.post.mockResolvedValue({ data: { access_token: 'ln-token' } });
+    axios.get.mockRejectedValue(new Error('profile error'));
+
+    const res = await request(httpServer).get('/auth/linkedin/callback?code=bad');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ message: 'Error logging in with LinkedIn' });
+  });
+});
+
+describe('Google callback – error handling', () => {
+  const axios = require('axios');
+  const { app } = require('../server');
+  const httpServer = require('http').createServer(app);
+
+  beforeAll(done => httpServer.listen(0, done));
+  afterAll(done => httpServer.close(done));
+
+  beforeEach(() => jest.clearAllMocks());
+
+  test('returns 500 when token exchange fails', async () => {
+    axios.post.mockRejectedValue(new Error('token error'));
+
+    const res = await request(httpServer).get('/auth/google/callback?code=bad');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ message: 'Error logging in with Google' });
+  });
+
+  test('returns 500 when userinfo fetch fails', async () => {
+    axios.post.mockResolvedValue({ data: { access_token: 'g-token' } });
+    axios.get.mockRejectedValue(new Error('userinfo error'));
+
+    const res = await request(httpServer).get('/auth/google/callback?code=bad');
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ message: 'Error logging in with Google' });
+  });
+});
+
+describe('Standalone server start (require.main === module)', () => {
+  const childProcess = require('child_process');
+  const path = require('path');
+
+  test('logs the start message and listens on 3000', (done) => {
+    // Spawn a separate Node process that runs server.js directly
+    const proc = childProcess.fork(path.resolve(__dirname, '../server.js'), {
+      env: { ...process.env, NODE_ENV: 'development' },
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc']
+    });
+
+    let stdout = '';
+    proc.stdout.on('data', data => (stdout += data.toString()));
+
+    // Wait a short time for the log line to appear, then kill the process
+    setTimeout(() => {
+      expect(stdout).toMatch(/Server started on port 3000/);
+      proc.kill();
+      done();
+    }, 500);
+  });
+});
