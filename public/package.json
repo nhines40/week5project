@@ -1,0 +1,35 @@
+{
+  "name": "public",
+  "version": "1.0.0",
+  "main": "app-transpiled.js",
+  "scripts": {
+    "test": "jest --coverage"
+  },
+  "jest": {
+    "testEnvironment": "jsdom",
+    "moduleNameMapper": {
+      "^react$": "<rootDir>/node_modules/react"
+    },
+    "coverageThreshold": {
+      "global": {
+        "branches": 100,
+        "functions": 100,
+        "lines": 100,
+        "statements": 100
+      }
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@babel/preset-react": "^7.27.1",
+    "@testing-library/jest-dom": "^6.8.0",
+    "@testing-library/react": "^16.3.0",
+    "axios-mock-adapter": "^2.1.0",
+    "babel-jest": "^30.1.2",
+    "jest": "^30.1.3",
+    "jest-environment-jsdom": "^30.1.2"
+  }
+}

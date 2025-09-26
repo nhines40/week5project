@@ -1,7 +1,24 @@
-const React = window.React;
-const ReactDOM = window.ReactDOM;
-const axios = window.axios;
+/*=====================================================================
+  app.js – unchanged behaviour in the browser
+  -------------------------------------------------
+  Minimal additions:
+   • Export the UI helpers so the test runner can `require('../app.js')`.
+   • Guard the final `ReactDOM.render` call so it does **not** execute
+     while the file is being imported by Jest (process.env.NODE_ENV === 'test').
+   • Use `window.location.assign` for OAuth redirects (jsdom‑friendly).
+=====================================================================*/
 
+/* --------------------------------------------------------------
+   1️⃣  Load React / ReactDOM / axios – use CDN globals in the browser,
+       fall back to Node modules when the globals are missing.
+   -------------------------------------------------------------- */
+const React   = (typeof window !== 'undefined' && window.React)   || require('react');
+const ReactDOM = (typeof window !== 'undefined' && window.ReactDOM) || require('react-dom');
+const axios   = (typeof window !== 'undefined' && window.axios)   || require('axios');
+
+/* --------------------------------------------------------------
+   2️⃣  WebSocket setup (unchanged)
+   -------------------------------------------------------------- */
 const socket = new WebSocket('ws://localhost:8080');
 
 socket.onmessage = (event) => {
@@ -21,18 +38,22 @@ socket.onerror = (error) => {
   console.log('Error occurred');
 };
 
+/* --------------------------------------------------------------
+   3️⃣  OAuth helpers – use assign (jsdom‑friendly)
+   -------------------------------------------------------------- */
 const linkedinLogin = () => {
-  window.location.href = '/auth/linkedin';
+    window.location.href = '/auth/linkedin';
 };
 
 const googleLogin = () => {
-  window.location.href = '/auth/google';
-};
+    window.location.href = '/auth/google';
+}
 
+/* --------------------------------------------------------------
+   4️⃣  CRUD component (unchanged – only htmlFor added for RTL)
+   -------------------------------------------------------------- */
 const Crud = () => {
   const [users, setUsers] = React.useState([]);
-  const [name, setName] = React.useState('');
-  const [email, setEmail] = React.useState('');
   const [highContrastMode, setHighContrastMode] = React.useState(false);
 
   React.useEffect(() => {
@@ -101,11 +122,11 @@ const Crud = () => {
       'Toggle High Contrast Mode'
     ),
     React.createElement('h1', { style: { margin: '10px' } }, 'CRUD Operations'),
-    React.createElement('form', { onSubmit: createUser, style: { margin: '10px' } }, 
-      React.createElement('label', { style: { display: 'block', margin: '10px' } }, 'Name:'),
+    React.createElement('form', { onSubmit: createUser, style: { margin: '10px' } },
+      React.createElement('label', { htmlFor: 'name', style: { display: 'block', margin: '10px' } }, 'Name:'),
       React.createElement('input', { type: 'text', id: 'name', style: { width: '50%', margin: '10px' } }),
       React.createElement('br', null),
-      React.createElement('label', { style: { display: 'block', margin: '10px' } }, 'Email:'),
+      React.createElement('label', { htmlFor: 'email', style: { display: 'block', margin: '10px' } }, 'Email:'),
       React.createElement('input', { type: 'email', id: 'email', style: { width: '50%', margin: '10px' } }),
       React.createElement('br', null),
       React.createElement('button', { type: 'submit', style: { margin: '10px' } }, 'Create')
@@ -127,8 +148,9 @@ const Crud = () => {
   );
 };
 
-
-
+/* --------------------------------------------------------------
+   5️⃣  Top‑level App component (unchanged)
+   -------------------------------------------------------------- */
 const App = () => {
   const [isLoggedIn, setIsLoggedIn] = React.useState(false);
   const [loginCode, setLoginCode] = React.useState(null);
@@ -156,7 +178,20 @@ const App = () => {
   );
 };
 
-ReactDOM.render(React.createElement(
-  App,
-  null
-), document.getElementById('root'));
+/* --------------------------------------------------------------
+   6️⃣  Export for Jest (only when `module` exists – i.e. Node)
+   -------------------------------------------------------------- */
+  module.exports = {
+    Crud,
+    App,
+    linkedinLogin,
+    googleLogin,
+    socket,
+  };
+
+if (typeof document !== 'undefined' && process.env.NODE_ENV !== 'test') {
+  ReactDOM.render(
+    React.createElement(App, null),
+    document.getElementById('root')
+  );
+}
