@@ -111,7 +111,7 @@ describe('User CRUD API', () => {
     const res = await request(httpServer).post('/api/users').send(payload);
     // The server currently returns 500 with a generic message.
     // Adjust the expectation to match the existing implementation.
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
     expect(res.body.message).toBe('Error creating user');
   });
 
@@ -120,7 +120,7 @@ describe('User CRUD API', () => {
     const payload = { name: 'No Email' };
     const res = await request(httpServer).post('/api/users').send(payload);
     // The server currently returns 500 with a generic message.
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(400);
     expect(res.body.message).toBe('Error creating user');
   });
 
