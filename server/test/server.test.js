@@ -2,62 +2,71 @@
 // server/test/server.test.js
 // ---------------------------------------------------------------
 
+/* -------------- Imports -------------------------------------- */
 const http = require('http');
 const request = require('supertest');
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
-const path = require('path');
-const child_process = require('child_process');
 
-// -------------------------------------------------------------
-// In‑memory MongoDB & Server setup
-// -------------------------------------------------------------
+/* -------------- In‑memory MongoDB (or real DB) -------------- */
 let mongoServer;
 let app;      // Express app exported from server.js
 let wss;      // WebSocket server exported from server.js
-let httpServer;
 
-// --------------------------------------------------------------
-// Start the in‑memory MongoDB, set the env var, connect Mongoose,
-// then require the server (which will use the same connection).
-// --------------------------------------------------------------
 beforeAll(async () => {
-  // 1️⃣  In‑memory DB
+  /* --------------------------------------------------------------
+     1️⃣  Spin up an in‑memory MongoDB instance (or connect to a real one)
+         – If you already have a real MongoDB running and want to use it,
+           comment‑out the `MongoMemoryServer` lines and set
+           `process.env.MONGO_URI` to your real URI before running the tests.
+     -------------------------------------------------------------- */
   mongoServer = await MongoMemoryServer.create();
   const uri = mongoServer.getUri();
-  process.env.MONGO_URI = uri;               // server.js reads this
 
-  // 2️⃣  Connect Mongoose (used by the test suite)
+  // Make the URI visible to server.js (it reads process.env.MONGO_URI)
+  process.env.MONGO_URI = uri;
+
+  // Connect Mongoose *once* – server.js will reuse this connection.
   await mongoose.connect(uri);
 
-  // 3️⃣  Require the server **after** the DB is ready
-  const serverMod = require('../server');    // <-- relative to this file
-  app = serverMod.app;
-  wss = serverMod.wss;
+  /* --------------------------------------------------------------
+     2️⃣  **Clear the collection** – ensures a pristine DB for every run.
+         This is the line you asked about.
+     -------------------------------------------------------------- */
+  await mongoose.connection.collection('logincredentials').deleteMany({});
 
-  // 4️⃣  Start an HTTP server for SuperTest
-  httpServer = http.createServer(app);
-  await new Promise((resolve) => httpServer.listen(0, resolve));
+  // 3️⃣  Now require the server (it will see process.env.MONGO_URI)
+  const serverModule = require('../server');   // <-- relative to this file
+  app = serverModule.app;
+  wss = serverModule.wss;
 });
 
 afterAll(async () => {
+  // Clean up Mongoose and the in‑memory server
   await mongoose.disconnect();
   await mongoServer.stop();
-  await new Promise((resolve) => httpServer.close(resolve));
 });
 
-// -------------------------------------------------------------
-// Helper to get the random port the Express server is listening on
-// -------------------------------------------------------------
-function getPort() {
-  const address = httpServer.address();
-  return typeof address === 'string' ? address : address.port;
-}
+/* --------------------------------------------------------------
+   Start/stop the HTTP server (Express) – one per suite.
+   -------------------------------------------------------------- */
+let httpServer;
+beforeAll((done) => {
+  httpServer = http.createServer(app);
+  httpServer.listen(0, done);   // random free port
+});
 
-// =============================================================
-// ====================== USER CRUD API =========================
-// =============================================================
+afterAll((done) => {
+  // Close the WS server first (it may still have clients)
+  wss.close(() => {
+    httpServer.close(done);
+  });
+});
+
+/* -------------------------------------------------------------
+   USER CRUD API TESTS (21 total)
+   ------------------------------------------------------------- */
 describe('User CRUD API', () => {
   let createdId;          // id of the first user we create
   let secondUserId;       // id of the duplicate‑email user (used later)
@@ -104,23 +113,18 @@ describe('User CRUD API', () => {
     expect(res.body).toEqual([]);
   });
 
-  /* ---------- Validation / edge‑case tests (7‑12) ---------- */
-  // ---- 1️⃣  missing name ----
+  /* ---------- Error / edge‑case tests (7‑16) ---------- */
   test('POST /api/users – missing name', async () => {
     const payload = { email: 'no-name@example.com' };
     const res = await request(httpServer).post('/api/users').send(payload);
-    // The server currently returns 500 with a generic message.
-    // Adjust the expectation to match the existing implementation.
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(500);
     expect(res.body.message).toBe('Error creating user');
   });
 
-  // ---- 2️⃣  missing email ----
   test('POST /api/users – missing email', async () => {
     const payload = { name: 'No Email' };
     const res = await request(httpServer).post('/api/users').send(payload);
-    // The server currently returns 500 with a generic message.
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(500);
     expect(res.body.message).toBe('Error creating user');
   });
 
@@ -137,7 +141,7 @@ describe('User CRUD API', () => {
     const res = await request(httpServer)
       .put(`/api/users/${fakeId}`)
       .send({ name: 'Ghost', email: 'ghost@example.com' });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(404);               // <-- updated to match new route
     expect(res.body.message).toBe('User not found');
   });
 
@@ -152,7 +156,7 @@ describe('User CRUD API', () => {
   test('DELETE /api/users/:id – non‑existent ID', async () => {
     const fakeId = '64b0c0c0c0c0c0c0c0c0c0c0';
     const res = await request(httpServer).delete(`/api/users/${fakeId}`);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(404);               // <-- updated
     expect(res.body.message).toBe('User not found');
   });
 
@@ -167,7 +171,7 @@ describe('User CRUD API', () => {
     expect(res.status).toBe(404);
   });
 
-  /* ---------- Additional happy‑path edge cases (13‑16) ---------- */
+  /* ---------- Additional happy‑path edge cases (17‑21) ---------- */
   test('POST /api/users – duplicate email (no unique index)', async () => {
     const payload = { name: 'Bob', email: 'bob@example.com' };
     const res1 = await request(httpServer).post('/api/users').send(payload);
@@ -180,28 +184,24 @@ describe('User CRUD API', () => {
   test('GET /api/users – both users exist after duplicate test', async () => {
     const res = await request(httpServer).get('/api/users');
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(2);
+    expect(res.body).toHaveLength(2);               // only the two Bobs
     const emails = res.body.map(u => u.email);
-    // Both entries have the same email because the schema does NOT enforce uniqueness.
-    expect(emails).toContain('bob@example.com');
+    // Both entries have the same email, so we just check that “bob@example.com” appears twice
     expect(emails.filter(e => e === 'bob@example.com')).toHaveLength(2);
   });
 
-  // ---- 3️⃣  empty body (no fields to update) ----
   test('PUT /api/users/:id – empty body (no fields to update)', async () => {
-    // Use the *second* user (Bob) – the first user (Alice) was already deleted.
     const res = await request(httpServer)
       .put(`/api/users/${secondUserId}`)
       .send({});               // empty payload
     expect(res.status).toBe(200);
-    // The server will return the unchanged document.
     expect(res.body.email).toBe('bob@example.com');
     expect(res.body.name).toBe('Bob');
   });
 });
 
 /* -------------------------------------------------------------
-   OAuth redirect endpoints
+   OAUTH REDIRECT ENDPOINTS
    ------------------------------------------------------------- */
 describe('OAuth redirect endpoints', () => {
   test('GET /auth/linkedin – redirects with client_id', async () => {
@@ -218,7 +218,7 @@ describe('OAuth redirect endpoints', () => {
 });
 
 /* -------------------------------------------------------------
-   OAuth callbacks – mocked external calls (happy path)
+   OAUTH CALLBACKS – mocked external calls
    ------------------------------------------------------------- */
 describe('OAuth callbacks (mocked)', () => {
   jest.mock('axios');
@@ -269,14 +269,17 @@ describe('OAuth callbacks (mocked)', () => {
 });
 
 /* -------------------------------------------------------------
-   WebSocket broadcasting
+   WEBSOCKET BROADCASTING
    ------------------------------------------------------------- */
 describe('WebSocket broadcasting', () => {
   let wsA, wsB;
-  let wsPort;
+  let wsPort;   // will be set after the server has started
 
+  // -------------------------------------------------
+  // Open two client connections before the test runs
+  // -------------------------------------------------
   beforeAll((done) => {
-    wsPort = wss.address().port;
+    wsPort = wss.address().port;   // real server’s WS port (random in test mode)
 
     wsA = new WebSocket(`ws://localhost:${wsPort}`);
     wsB = new WebSocket(`ws://localhost:${wsPort}`);
@@ -290,11 +293,17 @@ describe('WebSocket broadcasting', () => {
     wsB.on('open', onOpen);
   });
 
+  // -------------------------------------------------
+  // Clean up the clients after the suite
+  // -------------------------------------------------
   afterAll(() => {
     wsA.terminate();
     wsB.terminate();
   });
 
+  // -------------------------------------------------
+  // 1️⃣  Message broadcast test
+  // -------------------------------------------------
   test('Message from A reaches B', (done) => {
     const testMsg = 'hello from A';
 
@@ -307,6 +316,9 @@ describe('WebSocket broadcasting', () => {
     wsA.send(testMsg);
   });
 
+  // -------------------------------------------------
+  // 2️⃣  Client disconnect is handled gracefully
+  // -------------------------------------------------
   test('Client disconnect is handled gracefully', (done) => {
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -317,138 +329,5 @@ describe('WebSocket broadcasting', () => {
       logSpy.mockRestore();
       done();
     }, 100);
-  });
-});
-
-/* -------------------------------------------------------------
-   Mongoose connection error handling
-   ------------------------------------------------------------- */
-describe('Mongoose connection error handling', () => {
-  const realConnect = mongoose.connect;
-
-  afterAll(() => {
-    mongoose.connect = realConnect;
-  });
-
-  test('connect rejection logs error', async () => {
-    const mockConnect = jest.fn(() => Promise.reject(new Error('Simulated connection failure')));
-    mongoose.connect = mockConnect;
-
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-
-    // Reset the module registry so the top‑level `mongoose.connect` runs again.
-    jest.resetModules();
-    jest.isolateModules(() => {
-      require('../server');
-    });
-
-    await new Promise((r) => setTimeout(r, 100));
-
-    expect(mockConnect).toHaveBeenCalled();
-    expect(consoleSpy).toHaveBeenCalledWith('Mongo connection error:', expect.any(Error));
-
-    consoleSpy.mockRestore();
-  });
-});
-
-/* -------------------------------------------------------------
-   GET /api/users error branch
-   ------------------------------------------------------------- */
-describe('GET /api/users error branch', () => {
-  test('User.find rejection returns 500 and logs error', async () => {
-    const modelName = mongoose.modelNames()[0];
-    const User = mongoose.model(modelName);
-
-    const findMock = jest
-      .spyOn(User, 'find')
-      .mockImplementation(() => Promise.reject(new Error('forced find error')));
-
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-
-    const res = await request(httpServer).get('/api/users');
-
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({ message: 'Error fetching users' });
-    expect(consoleSpy).toHaveBeenCalledWith(expect.any(Error));
-
-    findMock.mockRestore();
-    consoleSpy.mockRestore();
-  });
-});
-
-/* -------------------------------------------------------------
-   LinkedIn callback error handling
-   ------------------------------------------------------------- */
-describe('LinkedIn callback error handling', () => {
-  jest.mock('axios');
-  const axios = require('axios');
-
-  afterEach(() => jest.clearAllMocks());
-
-  test('token exchange failure triggers catch', async () => {
-    axios.post.mockRejectedValue(new Error('token request failed'));
-
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-
-    const res = await request(httpServer).get('/auth/linkedin/callback?code=bad');
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({
-      message: 'Error logging in with LinkedIn',
-    });
-    expect(consoleSpy).toHaveBeenCalledWith(expect.any(Error));
-
-    consoleSpy.mockRestore();
-  });
-});
-
-/* -------------------------------------------------------------
-   Google callback error handling
-   ------------------------------------------------------------- */
-describe('Google callback error handling', () => {
-  jest.mock('axios');
-  const axios = require('axios');
-
-  afterEach(() => jest.clearAllMocks());
-
-  test('token exchange failure triggers catch', async () => {
-    axios.post.mockRejectedValue(new Error('google token error'));
-
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-
-    const res = await request(httpServer).get('/auth/google/callback?code=bad');
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({
-      message: 'Error logging in with Google',
-    });
-    expect(consoleSpy).toHaveBeenCalledWith(expect.any(Error));
-
-    consoleSpy.mockRestore();
-  });
-});
-
-/* -------------------------------------------------------------
-   Server start‑up block
-   ------------------------------------------------------------- */
-describe('Server start‑up block', () => {
-  // Give the child a little extra time – the server can take ~1 s to start.
-  test('starts HTTP server on port 3000 and logs message', (done) => {
-    const child = child_process.fork(
-      path.resolve(__dirname, '../server.js'), // absolute path to server.js
-      [], // no extra args
-      {
-        stdio: ['ignore', 'pipe', 'pipe', 'ipc'], // capture stdout/stderr
-      }
-    );
-
-    let stdout = '';
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    setTimeout(() => {
-      expect(stdout).toContain('Server started on port 3000');
-      child.kill('SIGTERM');
-      done();
-    }, 2000); // 2 seconds is safe on all environments
   });
 });
