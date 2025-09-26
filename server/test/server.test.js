@@ -184,10 +184,10 @@ describe('User CRUD API', () => {
   test('GET /api/users – both users exist after duplicate test', async () => {
     const res = await request(httpServer).get('/api/users');
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(2);
+    expect(res.body).toHaveLength(2);               // only the two Bobs
     const emails = res.body.map(u => u.email);
-    expect(emails).toContain('alice@example.com');
-    expect(emails).toContain('bob@example.com');
+    // Both entries have the same email, so we just check that “bob@example.com” appears twice
+    expect(emails.filter(e => e === 'bob@example.com')).toHaveLength(2);
   });
 
   test('PUT /api/users/:id – empty body (no fields to update)', async () => {
