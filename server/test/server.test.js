@@ -1,72 +1,64 @@
-// ---------------------------------------------------------------
-// server/test/server.test.js
-// ---------------------------------------------------------------
+/**
+ * server/test/server.test.js
+ * -------------------------------------------------
+ * 1️⃣  Original test suite (CRUD, OAuth redirects, callbacks,
+ *     WebSocket broadcasting) – unchanged.
+ * 2️⃣  Additional suites that exercise the previously uncovered
+ *     branches in server.js.
+ * -------------------------------------------------
+ */
 
-/* -------------- Imports -------------------------------------- */
 const http = require('http');
 const request = require('supertest');
 const WebSocket = require('ws');
 const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
+const childProcess = require('child_process');
+const path = require('path');
 
-/* -------------- In‑memory MongoDB (or real DB) -------------- */
+/* ==============================================================
+   0️⃣  GLOBAL SET‑UP – in‑memory MongoDB for the original suite
+   ============================================================== */
 let mongoServer;
 let app;      // Express app exported from server.js
 let wss;      // WebSocket server exported from server.js
+let httpServer; // HTTP server that wraps `app`
 
 beforeAll(async () => {
-  /* --------------------------------------------------------------
-     1️⃣  Spin up an in‑memory MongoDB instance (or connect to a real one)
-         – If you already have a real MongoDB running and want to use it,
-           comment‑out the `MongoMemoryServer` lines and set
-           `process.env.MONGO_URI` to your real URI before running the tests.
-     -------------------------------------------------------------- */
+  // ---------- 1️⃣ spin up in‑memory MongoDB ----------
   mongoServer = await MongoMemoryServer.create();
   const uri = mongoServer.getUri();
 
   // Make the URI visible to server.js (it reads process.env.MONGO_URI)
   process.env.MONGO_URI = uri;
 
-  // Connect Mongoose *once* – server.js will reuse this connection.
+  // Connect Mongoose once – server.js will reuse this connection
   await mongoose.connect(uri);
 
-  /* --------------------------------------------------------------
-     2️⃣  **Clear the collection** – ensures a pristine DB for every run.
-         This is the line you asked about.
-     -------------------------------------------------------------- */
+  // ---------- 2️⃣ clear the collection ----------
   await mongoose.connection.collection('logincredentials').deleteMany({});
 
-  // 3️⃣  Now require the server (it will see process.env.MONGO_URI)
-  const serverModule = require('../server');   // <-- relative to this file
+  // ---------- 3️⃣ require the server (app + wss) ----------
+  const serverModule = require('../server'); // relative to this file
   app = serverModule.app;
   wss = serverModule.wss;
+
+  // ---------- 4️⃣ start an HTTP server for the original tests ----------
+  httpServer = http.createServer(app);
+  await new Promise((res) => httpServer.listen(0, res)); // random free port
 });
 
 afterAll(async () => {
-  // Clean up Mongoose and the in‑memory server
+  // Close everything that the original suite created
+  await new Promise((res) => httpServer.close(res));
+  wss.close();
   await mongoose.disconnect();
   await mongoServer.stop();
 });
 
-/* --------------------------------------------------------------
-   Start/stop the HTTP server (Express) – one per suite.
-   -------------------------------------------------------------- */
-let httpServer;
-beforeAll((done) => {
-  httpServer = http.createServer(app);
-  httpServer.listen(0, done);   // random free port
-});
-
-afterAll((done) => {
-  // Close the WS server first (it may still have clients)
-  wss.close(() => {
-    httpServer.close(done);
-  });
-});
-
-/* -------------------------------------------------------------
-   USER CRUD API TESTS (21 total)
-   ------------------------------------------------------------- */
+/* ==============================================================
+   1️⃣  ORIGINAL USER CRUD / OAUTH / WEBSOCKET TESTS
+   ============================================================== */
 describe('User CRUD API', () => {
   let createdId;          // id of the first user we create
   let secondUserId;       // id of the duplicate‑email user (used later)
@@ -133,15 +125,15 @@ describe('User CRUD API', () => {
       .post('/api/users')
       .set('Content-Type', 'application/json')
       .send('{"name":"Bad JSON", "email":"bad@example.com"'); // missing }
-    expect(res.status).toBe(400);               // body‑parser rejects it
+    expect(res.status).toBe(400); // body‑parser rejects it
   });
 
   test('PUT /api/users/:id – non‑existent ID', async () => {
-    const fakeId = '64b0c0c0c0c0c0c0c0c0c0c0'; // valid 24‑hex but not in DB
+    const fakeId = '64b0c0c0c0c0c0c0c0c0c0c0';
     const res = await request(httpServer)
       .put(`/api/users/${fakeId}`)
       .send({ name: 'Ghost', email: 'ghost@example.com' });
-    expect(res.status).toBe(404);               // <-- updated to match new route
+    expect(res.status).toBe(404);
     expect(res.body.message).toBe('User not found');
   });
 
@@ -156,7 +148,7 @@ describe('User CRUD API', () => {
   test('DELETE /api/users/:id – non‑existent ID', async () => {
     const fakeId = '64b0c0c0c0c0c0c0c0c0c0c0';
     const res = await request(httpServer).delete(`/api/users/${fakeId}`);
-    expect(res.status).toBe(404);               // <-- updated
+    expect(res.status).toBe(404);
     expect(res.body.message).toBe('User not found');
   });
 
@@ -184,25 +176,22 @@ describe('User CRUD API', () => {
   test('GET /api/users – both users exist after duplicate test', async () => {
     const res = await request(httpServer).get('/api/users');
     expect(res.status).toBe(200);
-    expect(res.body).toHaveLength(2);               // only the two Bobs
-    const emails = res.body.map(u => u.email);
-    // Both entries have the same email, so we just check that “bob@example.com” appears twice
-    expect(emails.filter(e => e === 'bob@example.com')).toHaveLength(2);
+    expect(res.body).toHaveLength(2);
+    const emails = res.body.map((u) => u.email);
+    expect(emails.filter((e) => e === 'bob@example.com')).toHaveLength(2);
   });
 
   test('PUT /api/users/:id – empty body (no fields to update)', async () => {
     const res = await request(httpServer)
       .put(`/api/users/${secondUserId}`)
-      .send({});               // empty payload
+      .send({});
     expect(res.status).toBe(200);
     expect(res.body.email).toBe('bob@example.com');
     expect(res.body.name).toBe('Bob');
   });
 });
 
-/* -------------------------------------------------------------
-   OAUTH REDIRECT ENDPOINTS
-   ------------------------------------------------------------- */
+/* ---------- OAuth redirect endpoints ---------- */
 describe('OAuth redirect endpoints', () => {
   test('GET /auth/linkedin – redirects with client_id', async () => {
     const res = await request(httpServer).get('/auth/linkedin');
@@ -217,9 +206,7 @@ describe('OAuth redirect endpoints', () => {
   });
 });
 
-/* -------------------------------------------------------------
-   OAUTH CALLBACKS – mocked external calls
-   ------------------------------------------------------------- */
+/* ---------- OAuth callbacks (mocked) ---------- */
 describe('OAuth callbacks (mocked)', () => {
   jest.mock('axios');
   const axios = require('axios');
@@ -237,12 +224,14 @@ describe('OAuth callbacks (mocked)', () => {
       },
     });
 
-    const res = await request(httpServer).get('/auth/linkedin/callback?code=abc');
+    const res = await request(httpServer).get(
+      '/auth/linkedin/callback?code=abc'
+    );
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe('/?code=linkedin');
 
     const users = await request(httpServer).get('/api/users');
-    const linkedInUser = users.body.find(u => u.linkedinId === 'ln123');
+    const linkedInUser = users.body.find((u) => u.linkedinId === 'ln123');
     expect(linkedInUser).toBeDefined();
     expect(linkedInUser.email).toBe('john.doe@linkedin.com');
   });
@@ -257,30 +246,26 @@ describe('OAuth callbacks (mocked)', () => {
       },
     });
 
-    const res = await request(httpServer).get('/auth/google/callback?code=xyz');
+    const res = await request(httpServer).get(
+      '/auth/google/callback?code=xyz'
+    );
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe('/?code=google');
 
     const users = await request(httpServer).get('/api/users');
-    const googleUser = users.body.find(u => u.googleId === 'g123');
+    const googleUser = users.body.find((u) => u.googleId === 'g123');
     expect(googleUser).toBeDefined();
     expect(googleUser.email).toBe('jane.smith@gmail.com');
   });
 });
 
-/* -------------------------------------------------------------
-   WEBSOCKET BROADCASTING
-   ------------------------------------------------------------- */
+/* ---------- WebSocket broadcasting ---------- */
 describe('WebSocket broadcasting', () => {
   let wsA, wsB;
-  let wsPort;   // will be set after the server has started
+  let wsPort; // will be set after the server has started
 
-  // -------------------------------------------------
-  // Open two client connections before the test runs
-  // -------------------------------------------------
   beforeAll((done) => {
-    wsPort = wss.address().port;   // real server’s WS port (random in test mode)
-
+    wsPort = wss.address().port; // random free port from the original suite
     wsA = new WebSocket(`ws://localhost:${wsPort}`);
     wsB = new WebSocket(`ws://localhost:${wsPort}`);
 
@@ -293,35 +278,23 @@ describe('WebSocket broadcasting', () => {
     wsB.on('open', onOpen);
   });
 
-  // -------------------------------------------------
-  // Clean up the clients after the suite
-  // -------------------------------------------------
   afterAll(() => {
     wsA.terminate();
     wsB.terminate();
   });
 
-  // -------------------------------------------------
-  // 1️⃣  Message broadcast test
-  // -------------------------------------------------
   test('Message from A reaches B', (done) => {
     const testMsg = 'hello from A';
-
     wsB.once('message', (msg) => {
       const received = msg instanceof Buffer ? msg.toString() : msg;
       expect(received).toBe(testMsg);
       done();
     });
-
     wsA.send(testMsg);
   });
 
-  // -------------------------------------------------
-  // 2️⃣  Client disconnect is handled gracefully
-  // -------------------------------------------------
   test('Client disconnect is handled gracefully', (done) => {
     const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-
     wsA.close();
 
     setTimeout(() => {
@@ -332,189 +305,237 @@ describe('WebSocket broadcasting', () => {
   });
 });
 
+/* ==============================================================
+   2️⃣  NEW TESTS – previously uncovered branches
+   ============================================================== */
+
+/* -------------------------------------------------
+   2.1  Mongoose connection fallback (devUri)
+   ------------------------------------------------- */
 describe('Mongoose connection fallback (devUri)', () => {
-  const originalEnv = process.env;
+  const originalEnv = { ...process.env };
+  let connectSpy;
 
   beforeAll(() => {
-    // Remove the variable so the code falls back to the dev URI
-    delete process.env.MONGO_URI;
-  });
-
-  afterAll(() => {
-    process.env = originalEnv; // restore
-  });
-
-  test('connects using the hard‑coded dev URI when MONGO_URI is missing', async () => {
-    // Spy on mongoose.connect to capture the URI it receives
-    const connectSpy = jest.spyOn(require('mongoose'), 'connect')
+    delete process.env.MONGO_URI; // force fallback
+    connectSpy = jest
+      .spyOn(mongoose, 'connect')
       .mockImplementation(() => Promise.resolve());
 
-    // Re‑require the server module after the env change
+    // Re‑require the server after the env change
     jest.resetModules();
-    const { app } = require('../server');
+    require('../server'); // we only need the side‑effect of the connect call
+  });
 
-    expect(connectSpy).toHaveBeenCalledWith('mongodb://localhost:27017/myDatabase');
+  afterAll(() => {
     connectSpy.mockRestore();
+    process.env = originalEnv;
+  });
+
+  test('uses the hard‑coded dev URI when MONGO_URI is missing', () => {
+    expect(connectSpy).toHaveBeenCalledWith(
+      'mongodb://localhost:27017/myDatabase'
+    );
   });
 });
 
-
+/* -------------------------------------------------
+   2.2  Mongoose connection error handling
+   ------------------------------------------------- */
 describe('Mongoose connection error handling', () => {
-  const originalEnv = process.env;
+  const originalEnv = { ...process.env };
+  const fakeError = new Error('simulated connection failure');
 
   beforeAll(() => {
-    // Force the code to use the dev URI (or any bogus URI)
     delete process.env.MONGO_URI;
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+    jest
+      .spyOn(mongoose, 'connect')
+      .mockImplementation(() => Promise.reject(fakeError));
+
+    jest.resetModules();
+    require('../server'); // triggers the connect line
   });
 
   afterAll(() => {
+    console.error.mockRestore();
+    jest.restoreAllMocks();
     process.env = originalEnv;
   });
 
-  test('logs an error when mongoose.connect rejects', async () => {
-    const error = new Error('simulated connection failure');
-    const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-
-    // Mock mongoose.connect to reject
-    jest.spyOn(require('mongoose'), 'connect')
-      .mockImplementation(() => Promise.reject(error));
-
-    // Re‑require the server so the mocked connect runs
-    jest.resetModules();
-    require('../server'); // the module executes the connect line
-
-    expect(consoleSpy).toHaveBeenCalledWith('Mongo connection error:', error);
-    consoleSpy.mockRestore();
+  test('logs the connection error', () => {
+    expect(console.error).toHaveBeenCalledWith(
+      'Mongo connection error:',
+      fakeError
+    );
   });
 });
 
-
+/* -------------------------------------------------
+   2.3  WebSocket server on port 8080 (non‑test mode)
+   ------------------------------------------------- */
 describe('WebSocket server port selection (non‑test mode)', () => {
-  const originalEnv = process.env;
+  const originalEnv = { ...process.env };
+  let wssLocal;
 
   beforeAll(() => {
-    // Simulate a non‑test environment
-    process.env.NODE_ENV = 'development';
-  });
-
-  afterAll(() => {
-    process.env = originalEnv;
-  });
-
-  test('listens on 8080 when NODE_ENV !== "test"', (done) => {
-    // Re‑require the server after changing NODE_ENV
+    process.env.NODE_ENV = 'development'; // not "test"
     jest.resetModules();
-    const { wss } = require('../server');
+    const server = require('../server');
+    wssLocal = server.wss;
+  });
 
-    // The server should have bound to 8080
-    expect(wss.address().port).toBe(8080);
+  afterAll((done) => {
+    wssLocal.close(() => {
+      process.env = originalEnv;
+      done();
+    });
+  });
 
-    // Clean up
-    wss.close(done);
+  test('binds to 8080 when NODE_ENV !== "test"', () => {
+    expect(wssLocal.address().port).toBe(8080);
   });
 });
 
+/* -------------------------------------------------
+   2.4  GET /api/users error handling
+   ------------------------------------------------- */
 describe('GET /api/users – error handling', () => {
-  let app, httpServer;
+  let httpSrv;
+  let serverMod;
 
   beforeAll(async () => {
-    // Mock the Mongoose model's `find` to reject
-    jest.spyOn(require('mongoose').model('loginCredentials'), 'find')
+    // Mock the model's find() to reject
+    const User = mongoose.model('loginCredentials');
+    jest
+      .spyOn(User, 'find')
       .mockImplementation(() => Promise.reject(new Error('find failed')));
 
-    const serverModule = require('../server');
-    app = serverModule.app;
-    httpServer = require('http').createServer(app);
-    await new Promise(res => httpServer.listen(0, res));
+    serverMod = require('../server');
+    httpSrv = http.createServer(serverMod.app);
+    await new Promise((r) => httpSrv.listen(0, r));
   });
 
   afterAll(async () => {
-    await new Promise(res => httpServer.close(res));
+    await new Promise((r) => httpSrv.close(r));
     jest.restoreAllMocks();
   });
 
-  test('returns 500 and proper JSON when find throws', async () => {
-    const res = await request(httpServer).get('/api/users');
+  test('returns 500 with proper JSON', async () => {
+    const res = await request(httpSrv).get('/api/users');
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ message: 'Error fetching users' });
   });
 });
 
+/* -------------------------------------------------
+   2.5  LinkedIn callback error handling
+   ------------------------------------------------- */
 describe('LinkedIn callback – error handling', () => {
   const axios = require('axios');
-  const { app } = require('../server');
-  const httpServer = require('http').createServer(app);
+  let httpSrv;
 
-  beforeAll(done => httpServer.listen(0, done));
-  afterAll(done => httpServer.close(done));
-
-  beforeEach(() => jest.clearAllMocks());
-
-  test('returns 500 when token exchange fails', async () => {
-    axios.post.mockRejectedValue(new Error('token error'));
-
-    const res = await request(httpServer).get('/auth/linkedin/callback?code=bad');
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({ message: 'Error logging in with LinkedIn' });
+  beforeAll((done) => {
+    const serverMod = require('../server');
+    httpSrv = http.createServer(serverMod.app);
+    httpSrv.listen(0, done);
   });
 
-  test('returns 500 when profile fetch fails', async () => {
-    // token succeeds, profile request fails
+  afterAll((done) => {
+    httpSrv.close(done);
+    jest.clearAllMocks();
+  });
+
+  test('token exchange failure → 500', async () => {
+    axios.post.mockRejectedValue(new Error('token error'));
+
+    const res = await request(httpSrv).get(
+      '/auth/linkedin/callback?code=bad'
+    );
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      message: 'Error logging in with LinkedIn',
+    });
+  });
+
+  test('profile fetch failure → 500', async () => {
     axios.post.mockResolvedValue({ data: { access_token: 'ln-token' } });
     axios.get.mockRejectedValue(new Error('profile error'));
 
-    const res = await request(httpServer).get('/auth/linkedin/callback?code=bad');
+    const res = await request(httpSrv).get(
+      '/auth/linkedin/callback?code=bad'
+    );
     expect(res.status).toBe(500);
-    expect(res.body).toEqual({ message: 'Error logging in with LinkedIn' });
+    expect(res.body).toEqual({
+      message: 'Error logging in with LinkedIn',
+    });
   });
 });
 
+/* -------------------------------------------------
+   2.6  Google callback error handling
+   ------------------------------------------------- */
 describe('Google callback – error handling', () => {
   const axios = require('axios');
-  const { app } = require('../server');
-  const httpServer = require('http').createServer(app);
+  let httpSrv;
 
-  beforeAll(done => httpServer.listen(0, done));
-  afterAll(done => httpServer.close(done));
-
-  beforeEach(() => jest.clearAllMocks());
-
-  test('returns 500 when token exchange fails', async () => {
-    axios.post.mockRejectedValue(new Error('token error'));
-
-    const res = await request(httpServer).get('/auth/google/callback?code=bad');
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({ message: 'Error logging in with Google' });
+  beforeAll((done) => {
+    const serverMod = require('../server');
+    httpSrv = http.createServer(serverMod.app);
+    httpSrv.listen(0, done);
   });
 
-  test('returns 500 when userinfo fetch fails', async () => {
+  afterAll((done) => {
+    httpSrv.close(done);
+    jest.clearAllMocks();
+  });
+
+  test('token exchange failure → 500', async () => {
+    axios.post.mockRejectedValue(new Error('token error'));
+
+    const res = await request(httpSrv).get(
+      '/auth/google/callback?code=bad'
+    );
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      message: 'Error logging in with Google',
+    });
+  });
+
+  test('userinfo fetch failure → 500', async () => {
     axios.post.mockResolvedValue({ data: { access_token: 'g-token' } });
     axios.get.mockRejectedValue(new Error('userinfo error'));
 
-    const res = await request(httpServer).get('/auth/google/callback?code=bad');
+    const res = await request(httpSrv).get(
+      '/auth/google/callback?code=bad'
+    );
     expect(res.status).toBe(500);
-    expect(res.body).toEqual({ message: 'Error logging in with Google' });
+    expect(res.body).toEqual({
+      message: 'Error logging in with Google',
+    });
   });
 });
 
+/* -------------------------------------------------
+   2.7  Stand‑alone server start (require.main === module)
+   ------------------------------------------------- */
 describe('Standalone server start (require.main === module)', () => {
-  const childProcess = require('child_process');
-  const path = require('path');
-
-  test('logs the start message and listens on 3000', (done) => {
-    // Spawn a separate Node process that runs server.js directly
-    const proc = childProcess.fork(path.resolve(__dirname, '../server.js'), {
-      env: { ...process.env, NODE_ENV: 'development' },
-      stdio: ['ignore', 'pipe', 'pipe', 'ipc']
-    });
+  test('logs "Server started on port 3000"', (done) => {
+    const child = childProcess.fork(
+      path.resolve(__dirname, '../server.js'),
+      {
+        env: { ...process.env, NODE_ENV: 'development' },
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      }
+    );
 
     let stdout = '';
-    proc.stdout.on('data', data => (stdout += data.toString()));
+    child.stdout.on('data', (data) => (stdout += data.toString()));
 
-    // Wait a short time for the log line to appear, then kill the process
+    // Give the child a moment to start and emit the log line
     setTimeout(() => {
       expect(stdout).toMatch(/Server started on port 3000/);
-      proc.kill();
+      child.kill('SIGTERM');
       done();
     }, 500);
   });
