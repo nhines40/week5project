@@ -15,19 +15,20 @@ app.use(bodyParser.json());
 /* --------------------------------------------------------------
    1️⃣  MONGOOSE CONNECTION
    -------------------------------------------------------------- */
-// Use the URI that the test‑setup (mongodb‑memory‑server) puts into
-// `process.env.MONGO_URI`.  If that variable is not set we fall back
-// to the normal development URI.
 const devUri   = 'mongodb://localhost:27017/myDatabase';
 const mongoUri = process.env.MONGO_URI || devUri;
 
-mongoose
-  .connect(mongoUri)               // Mongoose 7+ ignores the old options
-  .catch(err => console.error('Mongo connection error:', err));
+// Export the connect function so the “connection‑error” test can
+// replace it with a mock and still have it executed.
+function startMongoose () {
+  return mongoose
+    .connect(mongoUri)               // Mongoose 7+ ignores the old options
+    .catch(err => console.error('Mongo connection error:', err));
+}
+startMongoose();   // run immediately for the normal server flow
 
 /* --------------------------------------------------------------
-   2️⃣  Mongoose model – make name & email required so validation
-       errors are exercised in the tests.
+   2️⃣  Mongoose model – name & email are required
    -------------------------------------------------------------- */
 const User = mongoose.model('loginCredentials', {
   name:  { type: String, required: true },
@@ -77,7 +78,7 @@ wss.on('connection', ws => {
 });
 
 /* --------------------------------------------------------------
-   6️⃣  REST API routes (unchanged logic)
+   6️⃣  REST API routes
    -------------------------------------------------------------- */
 app.get('/api/users', (req, res) => {
   User.find()
@@ -90,6 +91,14 @@ app.get('/api/users', (req, res) => {
 
 app.post('/api/users', (req, res) => {
   const { name, email } = req.body;
+
+  // ----  validation required for the two tests that send incomplete data ----
+  if (!name || !email) {
+    return res
+      .status(400)
+      .json({ message: 'Name and email are required' });
+  }
+
   const user = new User({ name, email });
   user.save()
     .then(() => res.status(201).json(user))
@@ -101,6 +110,23 @@ app.post('/api/users', (req, res) => {
 
 app.put('/api/users/:id', (req, res) => {
   const { name, email } = req.body;
+
+  // ----  empty‑body case (test “empty body (no fields to update)”) ----
+  if (!name && !email) {
+    // fetch the current document and return it unchanged
+    return User.findById(req.params.id)
+      .then(user => {
+        if (!user) {
+          return res.status(404).json({ message: 'User not found' });
+        }
+        res.status(200).json(user);
+      })
+      .catch(err => {
+        console.error(err);
+        res.status(500).json({ message: 'Error updating user' });
+      });
+  }
+
   User.findByIdAndUpdate(req.params.id, { name, email }, { new: true })
     .then(user => {
       if (!user) {
@@ -131,7 +157,7 @@ app.delete('/api/users/:id', (req, res) => {
 });
 
 /* --------------------------------------------------------------
-   7️⃣  OAuth redirect endpoints (unchanged)
+   7️⃣  OAuth redirect endpoints
    -------------------------------------------------------------- */
 app.get('/auth/linkedin', (req, res) => {
   const url = `https://www.linkedin.com/oauth/v2/authorization?response_type=code&client_id=${linkedinClientId}&redirect_uri=${linkedinRedirectUrl}&state=foobar&scope=liteprofile%20emailaddress%20w_member_social`;
@@ -211,7 +237,7 @@ app.use(express.static('public'));
 /* --------------------------------------------------------------
    9️⃣  Export for the test runner
    -------------------------------------------------------------- */
-module.exports = { app, wss };
+module.exports = { app, wss, startMongoose };
 
 /* --------------------------------------------------------------
    🔟  Start the HTTP server only when the file is executed directly
