@@ -216,7 +216,5 @@ module.exports = { app, wss };
 /* --------------------------------------------------------------
    🔟  Start the HTTP server only when the file is executed directly
    -------------------------------------------------------------- */
-if (require.main === module) {
-  const PORT = 3000;
-  app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
-}
+const PORT = 3000;
+app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
