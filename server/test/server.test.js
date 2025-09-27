@@ -409,17 +409,16 @@ describe('GET /api/users – error handling', () => {
   let serverMod;
 
   beforeAll(async () => {
-    // Mock the model's find() to reject
+    // Mock the model's find() to reject **before** the server is required
     const User = mongoose.model('loginCredentials');
     jest
       .spyOn(User, 'find')
       .mockImplementation(() => Promise.reject(new Error('find failed')));
 
-    // Load a fresh server instance after the mock is in place
-    jest.isolateModules(() => {
-      // eslint-disable-next-line global-require
-      serverMod = require('../server');
-    });
+    // Load a fresh server instance that will use the mocked model
+    jest.resetModules();
+    // eslint-disable-next-line global-require
+    serverMod = require('../server');
 
     httpSrv = http.createServer(serverMod.app);
     await new Promise((r) => httpSrv.listen(0, r));
@@ -544,22 +543,28 @@ describe('Google callback – error handling', () => {
    ------------------------------------------------- */
 describe('Standalone server start (require.main === module)', () => {
   test('logs "Server started on port 3000"', (done) => {
-    // Run the file as a separate process; we don’t need a real DB for this
-    // because the connection error is caught and the server still starts.
-    const cmd = `node ${path.resolve(__dirname, '../server.js')}`;
-    childProcess.exec(
-      cmd,
-      {
-        env: {
-          ...process.env,
-          NODE_ENV: 'development',
-          // Ensure the child does **not** inherit the in‑memory URI
-          MONGO_URI: '',
-        },
-        timeout: 5000,
+    // Spawn a separate node process; we only need the stdout line.
+    const child = childProcess.spawn('node', [path.resolve(__dirname, '../server.js')], {
+      env: {
+        ...process.env,
+        NODE_ENV: 'development',
+        // Ensure the child does NOT try to use the in‑memory URI
+        MONGO_URI: '',
       },
-      (err, stdout, stderr) => {
-        if (err) return done(err);
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    const timeout = setTimeout(() => {
+      child.kill('SIGTERM');
+      done(new Error('Did not see the start‑up log within 5 s'));
+    }, 5000);
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+      if (/Server started on port 3000/.test(stdout)) {
+        clearTimeout(timeout);
+        child.kill('SIGTERM');
         try {
           expect(stdout).toMatch(/Server started on port 3000/);
           done();
@@ -567,6 +572,13 @@ describe('Standalone server start (require.main === module)', () => {
           done(e);
         }
       }
-    );
+    });
+
+    child.stderr.on('data', (data) => {
+      // If the child crashes, forward the error
+      clearTimeout(timeout);
+      child.kill('SIGTERM');
+      done(new Error(`Child process error: ${data.toString()}`));
+    });
   });
 });
