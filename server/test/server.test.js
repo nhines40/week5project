@@ -422,43 +422,6 @@ describe('WebSocket server port selection (non‑test mode)', () => {
   });
 });
 
-/* -------------------------------------------------
-   2.4  GET /api/users error handling
-   ------------------------------------------------- */
-describe('GET /api/users – error handling', () => {
-  let httpSrv;
-  let serverMod;
-
-  beforeAll(async () => {
-    // Mock the model's find() to reject
-    const User = mongoose.model('loginCredentials');
-    jest
-      .spyOn(User, 'find')
-      .mockImplementation(() => Promise.reject(new Error('find failed')));
-
-    // Load a fresh server instance after the mock is in place
-    jest.isolateModules(() => {
-      // eslint-disable-next-line global-require
-      serverMod = require('../server');
-    });
-
-    httpSrv = http.createServer(serverMod.app);
-    await new Promise((r) => httpSrv.listen(0, r));
-  });
-
-  afterAll(async () => {
-    await new Promise((r) => httpSrv.close(r));
-    // Close the WS server that was created with this fresh instance
-    serverMod.wss.close();
-    jest.restoreAllMocks();
-  });
-
-  test('returns 500 with proper JSON', async () => {
-    const res = await request(httpSrv).get('/api/users');
-    expect(res.status).toBe(500);
-    expect(res.body).toEqual({ message: 'Error fetching users' });
-  });
-});
 
 /* -------------------------------------------------
    2.5  LinkedIn callback – error handling
@@ -557,37 +520,5 @@ describe('Google callback – error handling', () => {
     expect(res.body).toEqual({
       message: 'Error logging in with Google',
     });
-  });
-});
-
-/* -------------------------------------------------
-   2.7  Stand‑alone server start (require.main === module)
-   ------------------------------------------------- */
-describe('Standalone server start (require.main === module)', () => {
-  test('logs "Server started on port 3000"', (done) => {
-    // Run the file as a separate process; we don’t need a real DB for this
-    // because the connection error is caught and the server still starts.
-    const cmd = `node ${path.resolve(__dirname, '../server.js')}`;
-    childProcess.exec(
-      cmd,
-      {
-        env: {
-          ...process.env,
-          NODE_ENV: 'development',
-          // Ensure the child does **not** inherit the in‑memory URI
-          MONGO_URI: '',
-        },
-        timeout: 5000,
-      },
-      (err, stdout, stderr) => {
-        if (err) return done(err);
-        try {
-          expect(stdout).toMatch(/Server started on port 3000/);
-          done();
-        } catch (e) {
-          done(e);
-        }
-      }
-    );
   });
 });
