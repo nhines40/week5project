@@ -192,6 +192,27 @@ describe('User CRUD API', () => {
     expect(res.body.email).toBe('bob@example.com');
     expect(res.body.name).toBe('Bob');
   });
+
+  test('GET /api/users – forced 500 error (mocked find failure)', async () => {
+    // 1️⃣ Grab the Mongoose model that the route uses
+    const User = mongoose.model('loginCredentials');
+
+    // 2️⃣ Make User.find() reject – this triggers the .catch() in the route
+    const findMock = jest
+      .spyOn(User, 'find')
+      .mockImplementation(() => Promise.reject(new Error('forced failure')));
+
+    // 3️⃣ Perform the request
+    const res = await request(httpServer).get('/api/users');
+
+    // 4️⃣ Assertions – exactly what the catch block sends
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({ message: 'Error fetching users' });
+
+    // 5️⃣ Clean‑up – restore the original implementation so the rest
+    //    of the suite runs unaffected
+    findMock.mockRestore();
+  });
 });
 
 describe('OAuth redirect endpoints', () => {
